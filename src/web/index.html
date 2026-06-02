@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>paytr-python · test console</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="max-w-4xl mx-auto px-4 py-8 font-sans text-slate-800 dark:bg-slate-900 dark:text-slate-100">
+    <h1 class="text-2xl font-semibold">💳 paytr-python — test console</h1>
+    <p class="text-sm opacity-70 mt-1">Exercise every route: pay, refund, status &amp; the three reports.
+        Opened as a file? Point the API base at your running demo. Served by the app? Leave it blank.</p>
+
+    <div class="flex items-center gap-2 my-5">
+        <label for="base" class="text-sm">API base</label>
+        <input id="base" class="px-2 py-1.5 rounded border border-slate-400 bg-transparent min-w-[240px]"
+            placeholder="(same origin)">
+    </div>
+
+    <p class="text-sm opacity-70 mb-4">Only the buyer-facing purchase flow is exposed as a route.
+        Refund and status are merchant-only — drive them from <code>PayTRClient</code> in your backend.</p>
+
+    <!-- ── PAY ─────────────────────────────────────────────────────────── -->
+    <section class="panel" data-panel="pay">
+        <div class="card">
+            <h2 class="font-semibold mb-3">POST /paytr/pay — create a V2 iFrame token</h2>
+            <div class="grid grid-cols-2 gap-3">
+                <div><label class="lbl">Email</label><input id="p_email" class="in" value="test@example.com"></div>
+                <div><label class="lbl">Buyer name</label><input id="p_name" class="in" value="Test Buyer"></div>
+                <div><label class="lbl">Address</label><input id="p_address" class="in" value="Test Mah. Test Sok. No:1"></div>
+                <div><label class="lbl">Phone</label><input id="p_phone" class="in" value="05551112233"></div>
+                <div><label class="lbl">merchant_oid (blank = auto)</label><input id="p_oid" class="in" placeholder="(auto-generated)"></div>
+                <div><label class="lbl">Currency</label>
+                    <select id="p_currency" class="in">
+                        <option>TL</option><option>TRY</option><option>USD</option>
+                        <option>EUR</option><option>GBP</option><option>RUB</option>
+                    </select>
+                </div>
+                <div><label class="lbl">Language</label>
+                    <select id="p_lang" class="in"><option>tr</option><option>en</option></select>
+                </div>
+                <div><label class="lbl">Payment type</label>
+                    <select id="p_type" class="in">
+                        <option value="card">card</option>
+                        <option value="eft">eft (Havale/EFT)</option>
+                    </select>
+                </div>
+                <label class="flex items-center gap-2 self-end pb-2 text-sm">
+                    <input type="checkbox" id="p_dark"> Dark mode
+                </label>
+            </div>
+
+            <label class="lbl mt-4">Basket</label>
+            <div id="basket"></div>
+            <button class="mini" id="addLine" type="button">+ Add product</button>
+            <div class="font-semibold my-2">Total: <span id="basketTotal">0.00</span></div>
+
+            <button class="go" id="payBtn">Create token &amp; load iFrame</button>
+        </div>
+        <pre id="pay_out" class="out" hidden></pre>
+        <div id="pay_iframe"></div>
+    </section>
+
+    <!-- shared component classes (Tailwind @apply via the Play CDN config) -->
+    <style type="text/tailwindcss">
+        .card { @apply border border-slate-300 dark:border-slate-700 rounded-xl p-4 mb-4; }
+        .lbl  { @apply block text-xs opacity-80 mb-1; }
+        .in   { @apply w-full px-2.5 py-1.5 rounded-md border border-slate-400 bg-transparent; }
+        .go   { @apply px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white; }
+        .mini { @apply px-2.5 py-1 rounded-md border border-slate-300 dark:border-slate-700; }
+        .out  { @apply bg-slate-100 dark:bg-slate-800 p-3 rounded-lg overflow-auto text-xs max-h-96 whitespace-pre-wrap; }
+        .out.ok  { @apply ring-1 ring-green-600; }
+        .out.bad { @apply ring-1 ring-red-600; }
+        iframe   { @apply w-full min-h-[540px] border-0 mt-4; }
+    </style>
+
+    <script src="https://www.paytr.com/js/iframeResizer.min.js?v2"></script>
+    <script>
+        const $ = id => document.getElementById(id);
+
+        // file:// has no host to POST to → fall back to local dev server.
+        const isFile = location.protocol === 'file:';
+        $('base').value = isFile ? 'http://127.0.0.1:8000' : '';
+        const apiBase = () => $('base').value.replace(/\/$/, '');
+
+        // ── request helper: renders the JSON result into a <pre> ───────────
+        async function call(method, path, body, outEl) {
+            outEl.hidden = false;
+            outEl.className = 'out';
+            outEl.textContent = '… requesting ' + method + ' ' + path;
+            try {
+                const opts = { method, headers: {} };
+                if (body !== undefined) {
+                    opts.headers['Content-Type'] = 'application/json';
+                    opts.body = JSON.stringify(body);
+                }
+                const res = await fetch(apiBase() + path, opts);
+                const text = await res.text();
+                let data; try { data = JSON.parse(text); } catch { data = text; }
+                outEl.classList.add(res.ok ? 'ok' : 'bad');
+                outEl.textContent = 'HTTP ' + res.status + '\n\n' +
+                    (typeof data === 'string' ? data : JSON.stringify(data, null, 2));
+                return { res, data };
+            } catch (e) {
+                outEl.classList.add('bad');
+                outEl.textContent = 'Request failed: ' + e.message +
+                    '\n(is the demo running and the API base correct?)';
+                return { res: null, data: null };
+            }
+        }
+
+        // ── basket builder ─────────────────────────────────────────────────
+        const basket = $('basket');
+        function addLine(name = 'Demo product', price = 34.56, qty = 1) {
+            const row = document.createElement('div');
+            row.className = 'grid grid-cols-[2fr_1fr_.7fr_auto] gap-2 items-end mb-2';
+            row.innerHTML =
+                '<div><label class="lbl">Name</label><input class="in b-name" value="' + name + '"></div>' +
+                '<div><label class="lbl">Unit price</label><input class="in b-price" type="number" step="0.01" value="' + price + '"></div>' +
+                '<div><label class="lbl">Qty</label><input class="in b-qty" type="number" min="1" value="' + qty + '"></div>' +
+                '<button class="mini b-del" type="button" title="Remove">✕</button>';
+            row.querySelector('.b-del').onclick = () => { row.remove(); recalcTotal(); };
+            row.querySelectorAll('input').forEach(i => i.addEventListener('input', recalcTotal));
+            basket.appendChild(row);
+            recalcTotal();
+        }
+        function readBasket() {
+            return [...basket.querySelectorAll('.b-name')].map((_, i) => {
+                const row = basket.children[i];
+                return {
+                    name: row.querySelector('.b-name').value,
+                    unit_price: parseFloat(row.querySelector('.b-price').value) || 0,
+                    quantity: parseInt(row.querySelector('.b-qty').value) || 1,
+                };
+            });
+        }
+        function recalcTotal() {
+            const total = readBasket().reduce((s, i) => s + i.unit_price * i.quantity, 0);
+            $('basketTotal').textContent = total.toFixed(2);
+        }
+        $('addLine').onclick = () => addLine('Another item', 16.00, 1);
+        addLine();  // start with one line
+
+        // ── PAY ─────────────────────────────────────────────────────────────
+        $('payBtn').onclick = async () => {
+            $('pay_iframe').innerHTML = '';
+            const payload = {
+                email: $('p_email').value,
+                user_name: $('p_name').value,
+                user_address: $('p_address').value,
+                user_phone: $('p_phone').value,
+                basket: readBasket(),
+                currency: $('p_currency').value,
+                lang: $('p_lang').value,
+                dark_mode: $('p_dark').checked,
+                payment_type: $('p_type').value,
+            };
+            if ($('p_oid').value.trim()) payload.merchant_oid = $('p_oid').value.trim();
+            const { data } = await call('POST', '/paytr/pay', payload, $('pay_out'));
+            if (data && data.status === 'success' && data.iframe_url) {
+                $('pay_iframe').innerHTML =
+                    '<iframe src="' + data.iframe_url + '" id="paytriframe" ' +
+                    'frameborder="0" scrolling="no"></iframe>';
+                iFrameResize({}, '#paytriframe');
+            }
+        };
+    </script>
+</body>
+
+</html>
