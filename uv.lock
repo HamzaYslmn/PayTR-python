@@ -603,8 +603,8 @@ wheels = [
 
 [[package]]
 name = "paytr-python"
-version = "0.1.1"
-source = { virtual = "." }
+version = "0.1.2"
+source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
 ]

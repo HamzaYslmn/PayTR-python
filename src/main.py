@@ -44,7 +44,7 @@ def _include_routers(app: FastAPI, package: str = "api") -> None:
             log.warning("Skipped %s: no APIRouter named 'router'", mod_name)
 
 
-app = FastAPI(title="paytr-python", version="0.1.1", lifespan=lifespan)
+app = FastAPI(title="paytr-python", version="0.1.2", lifespan=lifespan)
 # Permissive CORS so web/index.html works even when opened directly as a file.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 _include_routers(app)
