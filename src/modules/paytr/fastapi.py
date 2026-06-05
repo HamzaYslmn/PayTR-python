@@ -25,6 +25,12 @@ Critical merchant-only operations (**refund**, **status query**, and the
 ``client.refund()`` / ``client.status()`` / ``client.transaction_detail()`` etc.
 on :class:`PayTRClient` directly from your own trusted server-side / admin code.
 
+**Security:** basket prices in :class:`PaymentRequest` come from the *client*,
+so ``/pay`` will sign whatever amount the browser sends. In production, derive
+prices from a server-side catalog and/or pass ``get_expected_amount`` so the
+``/callback`` reconciles the paid total against the order — a tampered ``/pay``
+request can then never be credited.
+
 Requires ``fastapi`` (``pip install 'paytr-python[fastapi]'``).
 """
 
@@ -54,7 +60,9 @@ Lang = Literal["tr", "en"]
 
 
 # --- request / response models (pydantic v2) --------------------------------
-class BasketLine(BaseModel):
+class BasketItem(BaseModel):
+    """One ``/pay`` basket line (the validated form of ``paytr.BasketLine``)."""
+
     name: str
     unit_price: float = Field(gt=0)  # major units, e.g. 34.56
     quantity: int = Field(1, ge=1)
@@ -65,7 +73,7 @@ class PaymentRequest(BaseModel):
     user_name: str = Field(max_length=60)
     user_address: str = Field(max_length=400)
     user_phone: str = Field(max_length=20)
-    basket: list[BasketLine] = Field(min_length=1)
+    basket: list[BasketItem] = Field(min_length=1)
     merchant_oid: str | None = Field(default=None, max_length=64)
     currency: Currency = "TL"
     lang: Lang = "tr"
@@ -102,12 +110,29 @@ class CallbackData(BaseModel):
         return self.test_mode == "1"
 
     @property
+    def paid_minor_units(self) -> int | None:
+        """``total_amount`` as an int (kuruş), or ``None`` if non-numeric.
+
+        PayTR sends an integer-string, but the field accepts any string — a
+        junk value must read as "no valid amount", never crash the route.
+        """
+        try:
+            return int(self.total_amount)
+        except (TypeError, ValueError):
+            return None
+
+    @property
     def error_message(self) -> str:
         """Human-readable failure reason (from PayTR or the error-code table)."""
         return self.failed_reason_msg or describe("payment", self.failed_reason_code)
 
 
 CallbackHandler = Callable[[CallbackData], Awaitable[None]]
+
+# Given a ``merchant_oid``, return the expected order total in **minor units**
+# (kuruş) — the same unit as PayTR's ``total_amount`` — or ``None`` to skip the
+# check (e.g. unknown oid). Used by ``/callback`` to reject amount tampering.
+AmountResolver = Callable[[str], Awaitable["int | None"]]
 
 
 def get_client_ip(request: Request) -> str:
@@ -138,6 +163,7 @@ def create_paytr_router(
     client: PayTRClient,
     *,
     on_payment: CallbackHandler,
+    get_expected_amount: AmountResolver | None = None,
     prefix: str = "/paytr",
     ok_url: str | None = None,
     fail_url: str | None = None,
@@ -150,6 +176,11 @@ def create_paytr_router(
     installment queries, direct payment) are intentionally *not* routed — drive
     them from ``PayTRClient`` in your own backend.
 
+    **Security:** basket prices in :class:`PaymentRequest` are supplied by the
+    *client*, so ``/pay`` signs whatever amount the browser sends. In production,
+    derive prices from a server-side catalog and/or pass ``get_expected_amount``
+    so a tampered ``/pay`` request can never be credited.
+
     Args:
         client: a configured :class:`PayTRClient`.
         on_payment: ``async (CallbackData) -> None`` run for each verified
@@ -157,6 +188,11 @@ def create_paytr_router(
             until it gets ``OK``, and if your handler raises we return non-200
             so PayTR re-sends — your handler may therefore see the same oid more
             than once.
+        get_expected_amount: optional ``async (merchant_oid) -> int | None``.
+            When given, a successful callback is only handed to ``on_payment``
+            if PayTR's ``total_amount`` matches the returned expected total (in
+            **minor units / kuruş**); a mismatch is rejected with HTTP 400.
+            Return ``None`` to skip the check for an oid.
         prefix: URL prefix for all routes (default ``/paytr``).
         ok_url / fail_url: buyer redirect URLs. Default to the router's own
             ``{prefix}/ok`` and ``{prefix}/fail``.
@@ -214,14 +250,28 @@ def create_paytr_router(
             return PlainTextResponse(
                 "PAYTR notification failed: bad hash", status_code=400
             )
+        # -- reconcile the paid amount against the expected order total --------
+        if get_expected_amount is not None and data.is_success:
+            expected = await get_expected_amount(data.merchant_oid)
+            if expected is not None and data.paid_minor_units != int(expected):
+                logger.error(
+                    "amount mismatch for oid=%s: paid=%s, expected=%s — rejecting callback",
+                    data.merchant_oid, data.total_amount, expected,
+                )
+                return PlainTextResponse(
+                    "PAYTR notification failed: amount mismatch", status_code=400
+                )
         try:
             await on_payment(data)
         except Exception:
-            # PayTR retries until it receives the body "OK". Returning "OK" here
-            # would tell it to stop — losing the notification if our handler
-            # failed. Return non-200 so PayTR re-sends the callback later.
+            # Per dev.paytr.com, PayTR re-sends the notification (after ~1 min)
+            # until it receives the exact body "OK" — the failure body/status
+            # carry no protocol meaning. Answering "OK" here would tell PayTR to
+            # stop and lose the notification, so return anything-but-OK.
             logger.exception("on_payment failed for oid=%s; asking PayTR to retry", data.merchant_oid)
-            return PlainTextResponse("retry", status_code=500)
+            return PlainTextResponse(
+                "PAYTR notification failed: handler error", status_code=500
+            )
         return PlainTextResponse("OK")
 
     # -- default redirect targets ------------------------------------------
@@ -241,6 +291,7 @@ def include_paytr_routes(
     client: PayTRClient,
     *,
     on_payment: CallbackHandler,
+    get_expected_amount: AmountResolver | None = None,
     prefix: str = "/paytr",
     ok_url: str | None = None,
     fail_url: str | None = None,
@@ -248,11 +299,14 @@ def include_paytr_routes(
 ) -> APIRouter:
     """Convenience wrapper: build the router and mount it on ``app``.
 
-    Returns the router (already included) for further inspection.
+    Accepts the same keywords as :func:`create_paytr_router` (including the
+    optional ``get_expected_amount`` amount-reconciliation hook) and returns the
+    router (already included) for further inspection.
     """
     router = create_paytr_router(
         client,
         on_payment=on_payment,
+        get_expected_amount=get_expected_amount,
         prefix=prefix,
         ok_url=ok_url,
         fail_url=fail_url,

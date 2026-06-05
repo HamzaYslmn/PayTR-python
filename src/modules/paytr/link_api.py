@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Literal
 
 from . import _crypto
-from ._base import _BaseClient, _minor_units
+from ._base import _BaseClient, _minor_units, _normalize_currency
 from .exceptions import PayTRConfigError
 
 LINK_CREATE_URL = "https://www.paytr.com/odeme/api/link/create"
@@ -43,7 +43,7 @@ class LinkMixin(_BaseClient):
         ``callback_link`` as a standard callback (verify with
         :meth:`verify_link_callback`).
         """
-        currency = "TL" if currency == "TRY" else currency
+        currency = _normalize_currency(currency)
         if link_type == "product":
             if min_count is None:
                 raise PayTRConfigError("link_type='product' requires min_count")
@@ -55,7 +55,8 @@ class LinkMixin(_BaseClient):
 
         amount = str(_minor_units(price))
         mi = str(max_installment)
-        token = _crypto.link_create_token(
+        token = self._sign(
+            _crypto.link_create_token,
             name=name,
             price=amount,
             currency=currency,
@@ -63,8 +64,6 @@ class LinkMixin(_BaseClient):
             link_type=link_type,
             lang=lang,
             conditional=conditional,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
         )
         params = {
             "merchant_id": self.merchant_id,
@@ -76,7 +75,7 @@ class LinkMixin(_BaseClient):
             "lang": lang,
             "paytr_token": token,
             "get_qr": "1" if get_qr else "0",
-            "debug_on": "1" if self.debug_on else "0",
+            "debug_on": self._debug_flag,
         }
         if link_type == "product":
             params["min_count"] = str(min_count)
@@ -93,29 +92,26 @@ class LinkMixin(_BaseClient):
         if pft is not None:
             params["pft"] = str(pft)
 
-        result = await self._post(LINK_CREATE_URL, params)
-        if result.get("status") != "success":
-            raise self._api_error("link", result, "create link failed")
-        return result
+        return await self._post_checked(
+            LINK_CREATE_URL, params, scope="link", default="create link failed"
+        )
 
     async def delete_payment_link(self, link_id: str) -> dict:
         """Delete a payment link by its PayTR ``id`` (from :meth:`create_payment_link`)."""
-        token = _crypto.link_delete_token(
+        token = self._sign(
+            _crypto.link_delete_token,
             link_id=link_id,
             merchant_id=self.merchant_id,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
         )
         params = {
             "merchant_id": self.merchant_id,
             "id": link_id,
             "paytr_token": token,
-            "debug_on": "1" if self.debug_on else "0",
+            "debug_on": self._debug_flag,
         }
-        result = await self._post(LINK_DELETE_URL, params)
-        if result.get("status") != "success":
-            raise self._api_error("link", result, "delete link failed")
-        return result
+        return await self._post_checked(
+            LINK_DELETE_URL, params, scope="link", default="delete link failed"
+        )
 
     def verify_link_callback(
         self,

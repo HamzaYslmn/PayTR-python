@@ -15,7 +15,7 @@ import hmac
 import pytest
 
 from paytr import PayTRClient, crypto, describe, encode_basket, iframe_html, iframe_url
-from paytr.client import _minor_units
+from paytr._base import _minor_units, _normalize_currency
 
 MERCHANT_ID = "123456"
 MERCHANT_KEY = b"SECRETKEY12345"
@@ -45,6 +45,13 @@ def test_minor_units():
     assert _minor_units("34.56") == 3456
     assert _minor_units(34.56) == 3456
     assert _minor_units("0.01") == 1
+
+
+def test_normalize_currency():
+    # "TRY" is the ISO alias PayTR wants spelled "TL"; everything else passes through.
+    assert _normalize_currency("TRY") == "TL"
+    assert _normalize_currency("USD") == "USD"
+    assert _normalize_currency("TL") == "TL"
 
 
 # --- token / hash builders --------------------------------------------------
@@ -194,6 +201,19 @@ def test_describe_known_and_unknown():
         assert "Unknown" in describe(scope, "x")
 
 
+def test_api_error_derives_default_message():
+    # With no err_msg/reason/code, _api_error falls back to "<scope> request failed".
+    err = _client()._api_error("refund", {})
+    assert str(err) == "refund request failed"
+    assert err.scope == "refund"
+    # An explicit default still wins over the derived one.
+    err2 = _client()._api_error("refund", {}, "custom default")
+    assert str(err2) == "custom default"
+    # A known code from the error table takes priority over the default.
+    err3 = _client()._api_error("refund", {"err_no": "1"})
+    assert "request failed" not in str(err3)
+
+
 
 # --- client helpers ---------------------------------------------------------
 def test_client_requires_credentials():
@@ -308,3 +328,80 @@ def test_callback_handler_failure_asks_for_retry():
         "merchant_oid": "O2", "status": "success", "total_amount": "100", "hash": good_hash
     })
     assert resp.status_code == 500 and resp.text != "OK"
+
+
+def _reconciling_client(expected: dict, seen: list):
+    """Build a TestClient whose /callback reconciles against ``expected`` (oid -> kuruş)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from paytr.fastapi import create_paytr_router
+
+    async def on_payment(data):
+        seen.append(data.merchant_oid)
+
+    async def get_expected_amount(merchant_oid: str):
+        return expected.get(merchant_oid)
+
+    app = FastAPI()
+    app.include_router(create_paytr_router(
+        _client(), on_payment=on_payment, get_expected_amount=get_expected_amount,
+    ))
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_callback_amount_reconciliation():
+    """get_expected_amount: match -> OK, mismatch -> 400, None -> check skipped."""
+    seen: list = []
+    # Expected totals in minor units; "OUNK" is unknown -> resolver returns None.
+    tc = _reconciling_client({"OMATCH": 100, "OBAD": 999}, seen)
+
+    # Matching amount: handler runs, OK.
+    h = _ref(f"OMATCH{SALT_S}success100".encode())
+    ok = tc.post("/paytr/callback", data={
+        "merchant_oid": "OMATCH", "status": "success", "total_amount": "100", "hash": h
+    })
+    assert ok.status_code == 200 and ok.text == "OK"
+
+    # Mismatched amount: rejected 400, handler must NOT run.
+    h = _ref(f"OBAD{SALT_S}success100".encode())
+    bad = tc.post("/paytr/callback", data={
+        "merchant_oid": "OBAD", "status": "success", "total_amount": "100", "hash": h
+    })
+    assert bad.status_code == 400 and "amount mismatch" in bad.text
+
+    # Unknown oid -> resolver returns None -> check skipped, handler runs.
+    h = _ref(f"OUNK{SALT_S}success100".encode())
+    skip = tc.post("/paytr/callback", data={
+        "merchant_oid": "OUNK", "status": "success", "total_amount": "100", "hash": h
+    })
+    assert skip.status_code == 200 and skip.text == "OK"
+
+    assert seen == ["OMATCH", "OUNK"]  # OBAD never reached the handler
+
+
+def test_callback_reconciliation_skipped_on_failure():
+    """A failed payment never reconciles amounts (the success gate only checks paid orders)."""
+    seen: list = []
+    tc = _reconciling_client({"OFAIL": 999}, seen)
+    h = _ref(f"OFAIL{SALT_S}failed100".encode())
+    resp = tc.post("/paytr/callback", data={
+        "merchant_oid": "OFAIL", "status": "failed", "total_amount": "100", "hash": h
+    })
+    # Not a success, so the mismatch check is skipped and the handler still runs.
+    assert resp.status_code == 200 and resp.text == "OK"
+    assert seen == ["OFAIL"]
+
+
+def test_callback_non_numeric_amount_is_mismatch_not_500():
+    """A non-numeric total_amount must reject as a mismatch (400), not crash to 500."""
+    seen: list = []
+    tc = _reconciling_client({"OWEIRD": 100}, seen)
+    # The hash is computed over the literal total_amount string, so a junk value
+    # can still pass the HMAC check; int() must not blow up into a retry-loop.
+    h = _ref(f"OWEIRD{SALT_S}successNaN".encode())
+    resp = tc.post("/paytr/callback", data={
+        "merchant_oid": "OWEIRD", "status": "success", "total_amount": "NaN", "hash": h
+    })
+    assert resp.status_code == 400 and "amount mismatch" in resp.text
+    assert seen == []

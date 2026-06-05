@@ -13,18 +13,14 @@ class StatusMixin(_BaseClient):
 
     async def status(self, merchant_oid: str) -> dict:
         """Query the current status of an order (amount, refunds, card info, ...)."""
-        token = _crypto.status_token(
+        token = self._sign(
+            _crypto.status_token,
             merchant_id=self.merchant_id,
             merchant_oid=merchant_oid,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
         )
         params = {
             "merchant_id": self.merchant_id,
             "merchant_oid": merchant_oid,
             "paytr_token": token,
         }
-        result = await self._post(STATUS_URL, params)
-        if result.get("status") != "success":
-            raise self._api_error("status", result, "status query failed")
-        return result
+        return await self._post_checked(STATUS_URL, params, scope="status")

@@ -10,7 +10,13 @@ from __future__ import annotations
 from decimal import Decimal
 
 from . import _crypto
-from ._base import BasketLine, _BaseClient, _money, encode_basket
+from ._base import (
+    BasketLine,
+    _BaseClient,
+    _money,
+    _normalize_currency,
+    encode_basket,
+)
 from .exceptions import PayTRConfigError
 
 BIN_DETAIL_URL = "https://www.paytr.com/odeme/api/bin-detail"
@@ -28,69 +34,57 @@ class DirectMixin(_BaseClient):
         """Look up card brand / bank / 3D eligibility for a BIN (first 6-8 digits)."""
         if not (bin_number.isdigit() and 6 <= len(bin_number) <= 8):
             raise PayTRConfigError("bin_number must be 6 to 8 digits")
-        token = _crypto.bin_token(
+        token = self._sign(
+            _crypto.bin_token,
             bin_number=bin_number,
             merchant_id=self.merchant_id,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
         )
         params = {
             "merchant_id": self.merchant_id,
             "bin_number": bin_number,
             "paytr_token": token,
         }
-        result = await self._post(BIN_DETAIL_URL, params)
-        if result.get("status") != "success":
-            raise self._api_error("bin", result, "bin lookup failed")
-        return result
+        return await self._post_checked(BIN_DETAIL_URL, params, scope="bin")
 
     async def installment_rates(self, request_id: str) -> dict:
         """Query the merchant's installment commission rates. ``request_id`` is a
         unique id you choose (max 32 chars), echoed back in the response."""
         if len(request_id) > 32:
             raise PayTRConfigError("request_id must be at most 32 characters")
-        token = _crypto.installment_rates_token(
+        token = self._sign(
+            _crypto.installment_rates_token,
             merchant_id=self.merchant_id,
             request_id=request_id,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
         )
         params = {
             "merchant_id": self.merchant_id,
             "request_id": request_id,
             "paytr_token": token,
         }
-        result = await self._post(INSTALLMENT_RATES_URL, params)
-        if result.get("status") != "success":
-            raise self._api_error("installment", result, "installment rates query failed")
-        return result
+        return await self._post_checked(
+            INSTALLMENT_RATES_URL, params, scope="installment"
+        )
 
     # -- stored cards (recurring) ------------------------------------------
     async def list_cards(self, utoken: str) -> dict:
         """List a user's stored cards by their ``utoken`` (returned in the callback
         of a ``store_card`` payment). Each card carries its ``ctoken`` for charging."""
-        token = _crypto.card_list_token(
-            utoken=utoken,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
-        )
+        token = self._sign(_crypto.card_list_token, utoken=utoken)
         params = {
             "merchant_id": self.merchant_id,
             "utoken": utoken,
             "paytr_token": token,
         }
-        result = await self._post(CARD_LIST_URL, params)
-        if result.get("status") != "success":
-            raise self._api_error("card", result, "card list failed")
-        return result
+        return await self._post_checked(
+            CARD_LIST_URL, params, scope="card", default="card list failed"
+        )
 
     async def delete_card(self, *, utoken: str, ctoken: str) -> dict:
         """Delete one stored card (``ctoken``) from a user (``utoken``)."""
-        token = _crypto.card_delete_token(
+        token = self._sign(
+            _crypto.card_delete_token,
             ctoken=ctoken,
             utoken=utoken,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
         )
         params = {
             "merchant_id": self.merchant_id,
@@ -98,10 +92,9 @@ class DirectMixin(_BaseClient):
             "ctoken": ctoken,
             "paytr_token": token,
         }
-        result = await self._post(CARD_DELETE_URL, params)
-        if result.get("status") != "success":
-            raise self._api_error("card", result, "card delete failed")
-        return result
+        return await self._post_checked(
+            CARD_DELETE_URL, params, scope="card", default="card delete failed"
+        )
 
     # -- direct / recurring payment ----------------------------------------
     async def direct_payment(
@@ -140,13 +133,14 @@ class DirectMixin(_BaseClient):
         ``"success"``, ``"wait_callback"`` (final result arrives at your callback
         URL — verify with :meth:`verify_callback`) or ``"failed"`` (raises).
         """
-        currency = "TL" if currency == "TRY" else currency
+        currency = _normalize_currency(currency)
         amount = _money(payment_amount)
         ic = str(installment_count)
-        test_mode = "1" if self.test_mode else "0"
+        test_mode = self._test_flag
         non_3d_flag = "1" if (non_3d or recurring) else "0"
 
-        token = _crypto.direct_payment_token(
+        token = self._sign(
+            _crypto.direct_payment_token,
             merchant_id=self.merchant_id,
             user_ip=user_ip,
             merchant_oid=merchant_oid,
@@ -157,8 +151,6 @@ class DirectMixin(_BaseClient):
             currency=currency,
             test_mode=test_mode,
             non_3d=non_3d_flag,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
         )
         params = {
             "merchant_id": self.merchant_id,
@@ -178,7 +170,7 @@ class DirectMixin(_BaseClient):
             "user_basket": encode_basket(user_basket),
             "merchant_ok_url": merchant_ok_url,
             "merchant_fail_url": merchant_fail_url,
-            "debug_on": "1" if self.debug_on else "0",
+            "debug_on": self._debug_flag,
         }
         # Card-storage / recurring fields are deliberately *not* part of the hash.
         if store_card:
@@ -192,8 +184,9 @@ class DirectMixin(_BaseClient):
         if cvv is not None:
             params["cvv"] = cvv
 
-        result = await self._post(DIRECT_PAYMENT_URL, params)
-        status = result.get("status")
-        if status in ("success", "wait_callback"):
-            return result
-        raise self._api_error("direct", result, "direct payment failed")
+        return await self._post_checked(
+            DIRECT_PAYMENT_URL,
+            params,
+            scope="direct",
+            ok_statuses=("success", "wait_callback"),
+        )

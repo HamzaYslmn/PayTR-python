@@ -113,15 +113,34 @@
 
         // ── basket builder ─────────────────────────────────────────────────
         const basket = $('basket');
+        // Build a field cell: <div><label class="lbl">…</label><input …></div>
+        function field(labelText, inputClass, value, attrs = {}) {
+            const wrap = document.createElement('div');
+            const label = document.createElement('label');
+            label.className = 'lbl';
+            label.textContent = labelText;
+            const input = document.createElement('input');
+            input.className = 'in ' + inputClass;
+            for (const [k, v] of Object.entries(attrs)) input.setAttribute(k, v);
+            input.value = value;
+            wrap.append(label, input);
+            return wrap;
+        }
         function addLine(name = 'Demo product', price = 34.56, qty = 1) {
             const row = document.createElement('div');
             row.className = 'grid grid-cols-[2fr_1fr_.7fr_auto] gap-2 items-end mb-2';
-            row.innerHTML =
-                '<div><label class="lbl">Name</label><input class="in b-name" value="' + name + '"></div>' +
-                '<div><label class="lbl">Unit price</label><input class="in b-price" type="number" step="0.01" value="' + price + '"></div>' +
-                '<div><label class="lbl">Qty</label><input class="in b-qty" type="number" min="1" value="' + qty + '"></div>' +
-                '<button class="mini b-del" type="button" title="Remove">✕</button>';
-            row.querySelector('.b-del').onclick = () => { row.remove(); recalcTotal(); };
+            const del = document.createElement('button');
+            del.className = 'mini b-del';
+            del.type = 'button';
+            del.title = 'Remove';
+            del.textContent = '✕';
+            row.append(
+                field('Name', 'b-name', name),
+                field('Unit price', 'b-price', price, { type: 'number', step: '0.01' }),
+                field('Qty', 'b-qty', qty, { type: 'number', min: '1' }),
+                del,
+            );
+            del.onclick = () => { row.remove(); recalcTotal(); };
             row.querySelectorAll('input').forEach(i => i.addEventListener('input', recalcTotal));
             basket.appendChild(row);
             recalcTotal();
@@ -145,7 +164,7 @@
 
         // ── PAY ─────────────────────────────────────────────────────────────
         $('payBtn').onclick = async () => {
-            $('pay_iframe').innerHTML = '';
+            $('pay_iframe').replaceChildren();  // drop any previous iframe
             const payload = {
                 email: $('p_email').value,
                 user_name: $('p_name').value,
@@ -160,9 +179,12 @@
             if ($('p_oid').value.trim()) payload.merchant_oid = $('p_oid').value.trim();
             const { data } = await call('POST', '/paytr/pay', payload, $('pay_out'));
             if (data && data.status === 'success' && data.iframe_url) {
-                $('pay_iframe').innerHTML =
-                    '<iframe src="' + data.iframe_url + '" id="paytriframe" ' +
-                    'frameborder="0" scrolling="no"></iframe>';
+                const iframe = document.createElement('iframe');
+                iframe.id = 'paytriframe';
+                iframe.setAttribute('frameborder', '0');
+                iframe.setAttribute('scrolling', 'no');
+                iframe.src = data.iframe_url;
+                $('pay_iframe').appendChild(iframe);
                 iFrameResize({}, '#paytriframe');
             }
         };

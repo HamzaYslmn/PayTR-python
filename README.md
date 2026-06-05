@@ -109,6 +109,30 @@ conversion, basket encoding, and HMAC signing. Response:
 `{"status": "success", "merchant_oid": "...", "token": "...", "iframe_url": "..."}`.
 Render the iframe with that `iframe_url` (and the PayTR resizer script).
 
+### Security
+
+The basket in `POST /paytr/pay` is **client-supplied**, so `/pay` will sign
+whatever prices the browser sends. **Never trust those prices** — derive them
+from a server-side catalog by `merchant_oid` (or product id).
+
+For defence in depth, pass an async `get_expected_amount(merchant_oid)` that
+returns the order's expected total in **minor units (kuruş)**. A successful
+callback whose `total_amount` doesn't match is rejected with HTTP 400, before
+your `on_payment` runs:
+
+```python
+async def get_expected_amount(merchant_oid: str) -> int | None:
+    order = await orders.get(merchant_oid)        # your server-side record
+    return order.total_kurus if order else None   # None → skip the check
+
+include_paytr_routes(
+    app, client, on_payment=on_payment, get_expected_amount=get_expected_amount
+)
+```
+
+Callbacks are **HMAC-verified with a constant-time comparison** out of the box,
+so a forged or replayed notification never reaches `on_payment`.
+
 ## 2. The client (framework-agnostic)
 
 ```python
@@ -236,7 +260,8 @@ The `src/` tree is a runnable example app (`src` layout; the library lives under
 ```
 src/
   main.py            # loads .env, CORS, auto-discovers api/ routers
-  modules/paytr/     # the library (+ _client.py: configured singleton)
+  modules/paytr/     # the library (credential-free, imports as `paytr`)
+  api/_client.py     # configured PayTRClient singleton (env credentials)
   api/payment.py     # mounts the library router (create_paytr_router)
   api/page.py        # serves the test page at /paytr/
   web/index.html     # standalone test page (served, or opened as a file)
@@ -247,5 +272,4 @@ uv sync --all-extras
 cp src/example.env .env             # fill in real credentials
 cd src && uv run main.py            # http://127.0.0.1:8000/paytr/
 uv run pytest                       # tests (no network)
-uv run python test/excardtest.py    # create a test token + iFrame URL
 ```

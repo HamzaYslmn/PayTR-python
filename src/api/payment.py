@@ -6,16 +6,20 @@ This is all the wiring an app needs — the endpoints themselves live in
 
 import logging
 
-from fastapi import APIRouter  # noqa: F401 — router auto-discovery marker
-
-from paytr._client import client
 from paytr.fastapi import CallbackData, create_paytr_router
+
+from ._client import client
 
 log = logging.getLogger("paytr")
 
 
 async def on_payment(data: CallbackData) -> None:
-    """Business logic for a verified callback. Idempotent per merchant_oid."""
+    """Business logic for a verified callback. Idempotent per merchant_oid.
+
+    Production handlers should reconcile ``data.total_amount`` (minor units)
+    against the order's expected total before crediting it — wire a
+    ``get_expected_amount`` resolver into the router (see ``paytr.fastapi``).
+    """
     if data.is_success:
         log.info("PAID   oid=%s amount=%s", data.merchant_oid, data.total_amount)
     else:

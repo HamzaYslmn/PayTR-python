@@ -25,7 +25,7 @@ from types import TracebackType
 from typing import Any, Literal
 
 from . import _crypto
-from .errors import describe
+from .errors import Scope, describe
 from .exceptions import PayTRAPIError, PayTRConfigError, PayTRNetworkError
 
 # A basket line: (name, unit_price_in_major_units, quantity).
@@ -45,6 +45,11 @@ def _detect_backend(client: Any) -> str:
     raise PayTRConfigError(
         "client must be an aiohttp.ClientSession or an httpx.AsyncClient"
     )
+
+
+def _normalize_currency(currency: str) -> str:
+    """PayTR expects ``"TL"``; accept the ISO spelling ``"TRY"`` as an alias."""
+    return "TL" if currency == "TRY" else currency
 
 
 def _money(value: str | float | Decimal) -> str:
@@ -180,8 +185,41 @@ class _BaseClient:
                 f"PayTR returned a non-JSON response from {url}: {text[:200]!r}"
             ) from e
 
+    @property
+    def _test_flag(self) -> str:
+        """``"1"``/``"0"`` form of ``test_mode`` for the PayTR params."""
+        return "1" if self.test_mode else "0"
+
+    @property
+    def _debug_flag(self) -> str:
+        """``"1"``/``"0"`` form of ``debug_on`` for the PayTR params."""
+        return "1" if self.debug_on else "0"
+
+    def _sign(self, builder, **kwargs) -> str:
+        """Call a :mod:`._crypto` token builder with this client's signing keys."""
+        return builder(
+            merchant_key=self.merchant_key,
+            merchant_salt=self.merchant_salt,
+            **kwargs,
+        )
+
+    async def _post_checked(
+        self,
+        url: str,
+        params: dict,
+        *,
+        scope: Scope,
+        default: str | None = None,
+        ok_statuses: tuple[str, ...] = ("success",),
+    ) -> dict:
+        """POST and raise unless ``status`` is one of ``ok_statuses``."""
+        result = await self._post(url, params)
+        if result.get("status") not in ok_statuses:
+            raise self._api_error(scope, result, default)
+        return result
+
     @staticmethod
-    def _api_error(scope: str, result: dict, default: str) -> PayTRAPIError:
+    def _api_error(scope: Scope, result: dict, default: str | None = None) -> PayTRAPIError:
         code = result.get("err_no")
         code = str(code) if code is not None else None
         message = (
@@ -189,6 +227,7 @@ class _BaseClient:
             or result.get("reason")
             or describe(scope, code)
             or default
+            or f"{scope} request failed"
         )
         return PayTRAPIError(message, code=code, scope=scope, payload=result)
 
