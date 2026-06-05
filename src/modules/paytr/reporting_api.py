@@ -36,28 +36,21 @@ class ReportingMixin(_BaseClient):
 
         Returns ``{}`` when PayTR reports no data (``status == "failed"``).
         """
-        token = _crypto.report_date_token(
+        token = self._sign(
+            _crypto.report_date_token,
             merchant_id=self.merchant_id,
             date=date,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
         )
         params = {"merchant_id": self.merchant_id, "date": date, "paytr_token": token}
-        result = await self._post(PAYMENT_DETAIL_URL, params)
-        status = result.get("status")
-        if status == "failed":
-            return {}
-        if status != "success":
-            raise self._api_error("status", result, "payment detail query failed")
-        return result
+        result = await self._post_report(PAYMENT_DETAIL_URL, params)
+        return result or {}
 
     async def _report_range(self, url: str, start_date: str, end_date: str) -> dict | None:
-        token = _crypto.report_range_token(
+        token = self._sign(
+            _crypto.report_range_token,
             merchant_id=self.merchant_id,
             start_date=start_date,
             end_date=end_date,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
         )
         params = {
             "merchant_id": self.merchant_id,
@@ -65,10 +58,15 @@ class ReportingMixin(_BaseClient):
             "end_date": end_date,
             "paytr_token": token,
         }
+        return await self._post_report(url, params)
+
+    async def _post_report(self, url: str, params: dict) -> dict | None:
+        # Report endpoints signal "no data" with status == "failed" and share the
+        # status-query error table for real errors.
         result = await self._post(url, params)
         status = result.get("status")
         if status == "failed":
             return None
         if status != "success":
-            raise self._api_error("status", result, "report query failed")
+            raise self._api_error("status", result)
         return result

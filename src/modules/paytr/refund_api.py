@@ -22,12 +22,11 @@ class RefundMixin(_BaseClient):
     ) -> dict:
         """Refund all or part of an order. ``return_amount`` is in major units."""
         amount = _money(return_amount)
-        token = _crypto.refund_token(
+        token = self._sign(
+            _crypto.refund_token,
             merchant_id=self.merchant_id,
             merchant_oid=merchant_oid,
             return_amount=amount,
-            merchant_key=self.merchant_key,
-            merchant_salt=self.merchant_salt,
         )
         params = {
             "merchant_id": self.merchant_id,
@@ -38,7 +37,4 @@ class RefundMixin(_BaseClient):
         if reference_no:
             params["reference_no"] = reference_no
 
-        result = await self._post(REFUND_URL, params)
-        if result.get("status") != "success":
-            raise self._api_error("refund", result, "refund failed")
-        return result
+        return await self._post_checked(REFUND_URL, params, scope="refund")

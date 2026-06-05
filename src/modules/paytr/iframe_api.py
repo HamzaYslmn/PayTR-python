@@ -5,7 +5,14 @@ from __future__ import annotations
 from decimal import Decimal
 
 from . import _crypto
-from ._base import BasketLine, PaymentType, _BaseClient, _minor_units, encode_basket
+from ._base import (
+    BasketLine,
+    PaymentType,
+    _BaseClient,
+    _minor_units,
+    _normalize_currency,
+    encode_basket,
+)
 
 GET_TOKEN_URL = "https://www.paytr.com/odeme/api/get-token"
 IFRAME_BASE_URL = "https://www.paytr.com/odeme/guvenli"
@@ -60,17 +67,18 @@ class IframeMixin(_BaseClient):
         "payment_amount"}`` on success and raises :class:`PayTRAPIError` /
         :class:`PayTRNetworkError` otherwise.
         """
-        currency = "TL" if currency == "TRY" else currency
+        currency = _normalize_currency(currency)
         amount = str(_minor_units(payment_amount))
         basket = encode_basket(user_basket)
-        test_mode = "1" if self.test_mode else "0"
+        test_mode = self._test_flag
         ni = str(self.default_no_installment if no_installment is None else no_installment)
         mi = str(self.default_max_installment if max_installment is None else max_installment)
         is_eft = payment_type == "eft"
 
         if is_eft:
             # Havale/EFT signs id+ip+oid+email+amount+payment_type+test (+salt).
-            token = _crypto.eft_token(
+            token = self._sign(
+                _crypto.eft_token,
                 merchant_id=self.merchant_id,
                 user_ip=user_ip,
                 merchant_oid=merchant_oid,
@@ -78,11 +86,10 @@ class IframeMixin(_BaseClient):
                 payment_amount=amount,
                 payment_type="eft",
                 test_mode=test_mode,
-                merchant_key=self.merchant_key,
-                merchant_salt=self.merchant_salt,
             )
         else:
-            token = _crypto.iframe_token(
+            token = self._sign(
+                _crypto.iframe_token,
                 merchant_id=self.merchant_id,
                 user_ip=user_ip,
                 merchant_oid=merchant_oid,
@@ -93,8 +100,6 @@ class IframeMixin(_BaseClient):
                 max_installment=mi,
                 currency=currency,
                 test_mode=test_mode,
-                merchant_key=self.merchant_key,
-                merchant_salt=self.merchant_salt,
             )
 
         params = {
@@ -105,7 +110,7 @@ class IframeMixin(_BaseClient):
             "payment_amount": amount,
             "paytr_token": token,
             "user_basket": basket,
-            "debug_on": "1" if self.debug_on else "0",
+            "debug_on": self._debug_flag,
             "no_installment": ni,
             "max_installment": mi,
             "user_name": user_name,
@@ -126,9 +131,9 @@ class IframeMixin(_BaseClient):
             params["iframe_v2"] = "1"
             params["iframe_v2_dark"] = "1" if dark_mode else "0"
 
-        result = await self._post(GET_TOKEN_URL, params)
-        if result.get("status") != "success":
-            raise self._api_error("payment", result, "get-token failed")
+        result = await self._post_checked(
+            GET_TOKEN_URL, params, scope="payment", default="get-token failed"
+        )
 
         return {
             "status": "success",

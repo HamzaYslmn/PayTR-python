@@ -30,7 +30,14 @@ from __future__ import annotations
 
 from . import _crypto as crypto
 from . import errors
-from .client import PayTRClient, encode_basket, iframe_html, iframe_url
+from .client import (
+    BasketLine,
+    PayTRClient,
+    PaymentType,
+    encode_basket,
+    iframe_html,
+    iframe_url,
+)
 from .errors import describe
 from ._log import logger, setup_logging
 from .exceptions import (
@@ -40,10 +47,12 @@ from .exceptions import (
     PayTRNetworkError,
 )
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "PayTRClient",
+    "BasketLine",
+    "PaymentType",
     "encode_basket",
     "iframe_url",
     "iframe_html",

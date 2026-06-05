@@ -10,11 +10,28 @@ Use :func:`describe` to turn a raw code into a human message.
 The link, BIN, installment, stored-card and direct-payment endpoints return
 their failure reason as free text (``reason`` / ``err_msg``), not numeric codes,
 so :class:`~paytr.exceptions.PayTRAPIError` surfaces PayTR's own message for
-them; their scopes are registered here only so :func:`describe` degrades to a
-generic message instead of guessing.
+them; :func:`describe` falls back to a generic message for any scope without a
+table.
 """
 
 from __future__ import annotations
+
+from typing import Literal
+
+# A scope names one error table below (the keys of ``_TABLES``). It is a typing
+# aid only — :func:`describe` still accepts any string and degrades gracefully.
+Scope = Literal[
+    "payment",
+    "refund",
+    "status",
+    "transfer",
+    "platform",
+    "link",
+    "bin",
+    "installment",
+    "card",
+    "direct",
+]
 
 # MARK: Error Mappings
 
@@ -97,22 +114,18 @@ TRANSFER_ERRORS: dict[str, str] = {
 
 # MARK: Table Mapping and Lookup
 
-_TABLES: dict[str, dict[str, str]] = {
+# Reason-style scopes (link, bin, installment, card, direct) have no numeric
+# tables — ``describe``'s ``.get(scope, {})`` default covers them.
+_TABLES: dict[Scope, dict[str, str]] = {
     "payment": PAYMENT_ERRORS,
     "refund": REFUND_ERRORS,
     "status": STATUS_ERRORS,
     "transfer": TRANSFER_ERRORS,
     "platform": TRANSFER_ERRORS,
-    # Reason-style endpoints (free-text errors, no numeric tables).
-    "link": {},
-    "bin": {},
-    "installment": {},
-    "card": {},
-    "direct": {},
 }
 
 
-def describe(scope: str, code: str | int | None) -> str:
+def describe(scope: Scope, code: str | int | None) -> str:
     """Human-readable message for an error ``code`` within a ``scope``.
 
     ``scope`` is one of ``"payment"``, ``"refund"``, ``"status"``,
