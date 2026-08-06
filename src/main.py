@@ -2,20 +2,15 @@ from dotenv import load_dotenv
 
 load_dotenv()  # credentials from .env (see src/example.env)
 
-import importlib
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-_SRC = Path(__file__).parent
 # Make the library under modules/ importable by its public name: `import paytr`.
-sys.path.insert(0, str(_SRC / "modules"))
+sys.path.insert(0, str(Path(__file__).parent / "modules"))
 
-from fastapi import APIRouter, FastAPI
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-# Importing paytr auto-configures the [PAYTR] logger (no setup call needed).
-from paytr import logger as log
 
 
 # MARK: Lifespan — close the shared PayTR client on shutdown
@@ -27,24 +22,14 @@ async def lifespan(app: FastAPI):
     await client.aclose()
 
 
-# MARK: Auto-discover routers — mount every api/ module that defines an APIRouter
-def _include_routers(app: FastAPI, package: str = "api") -> None:
-    for py in sorted((_SRC / package).glob("*.py")):
-        if py.stem.startswith("_"):  # skip dunder / app-glue modules
-            continue
-        mod_name = f"{package}.{py.stem}"
-        module = importlib.import_module(mod_name)
-        if isinstance(getattr(module, "router", None), APIRouter):
-            app.include_router(module.router)
-            log.info("Mounted %s (%d routes)", mod_name, len(module.router.routes))
-        else:
-            log.warning("Skipped %s: no APIRouter named 'router'", mod_name)
-
-
-app = FastAPI(title="paytr-python", version="0.1.3", lifespan=lifespan)
+app = FastAPI(title="paytr-python", version="0.2.0", lifespan=lifespan)
 # Permissive CORS so web/index.html works even when opened directly as a file.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-_include_routers(app)
+
+from api import page, payment  # noqa: E402  (needs the sys.path insert above)
+
+app.include_router(page.router)
+app.include_router(payment.router)
 
 
 # MARK: Dev launcher — run from src/:  uv run main.py

@@ -225,6 +225,23 @@ def test_iframe_helpers():
     assert iframe_url("ABC123") == "https://www.paytr.com/odeme/guvenli/ABC123"
     html = iframe_html("ABC123")
     assert "https://www.paytr.com/odeme/guvenli/ABC123" in html and "iFrameResize" in html
+    # New design needs the ?v2 resizer script (default); classic drops it.
+    assert "iframeResizer.min.js?v2" in html
+    assert "iframeResizer.min.js?v2" not in iframe_html("ABC123", v2=False)
+
+
+def test_from_env(monkeypatch):
+    monkeypatch.setenv("PAYTR_MERCHANT_ID", MERCHANT_ID)
+    monkeypatch.setenv("PAYTR_MERCHANT_KEY", "envkey")
+    monkeypatch.setenv("PAYTR_MERCHANT_SALT", "envsalt")
+    monkeypatch.setenv("PAYTR_TEST_MODE", "1")
+    c = PayTRClient.from_env()
+    assert c.merchant_id == MERCHANT_ID and c.test_mode is True
+    # Overrides win over the environment.
+    assert PayTRClient.from_env(test_mode=False).test_mode is False
+    monkeypatch.delenv("PAYTR_MERCHANT_KEY")
+    with pytest.raises(Exception):
+        PayTRClient.from_env()
 
 
 def test_client_verify_callback():
@@ -391,6 +408,89 @@ def test_callback_reconciliation_skipped_on_failure():
     # Not a success, so the mismatch check is skipped and the handler still runs.
     assert resp.status_code == 200 and resp.text == "OK"
     assert seen == ["OFAIL"]
+
+
+def test_test_mode_callback_never_credits_live_client():
+    """test_mode=1 callbacks on a live client are ACKed but never reach on_payment."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from paytr.fastapi import create_paytr_router
+
+    seen: list = []
+
+    async def on_payment(data):
+        seen.append(data.merchant_oid)
+
+    app = FastAPI()
+    app.include_router(create_paytr_router(_client(), on_payment=on_payment))  # live client
+    tc = TestClient(app)
+
+    h = _ref(f"OTEST{SALT_S}success100".encode())
+    resp = tc.post("/paytr/callback", data={
+        "merchant_oid": "OTEST", "status": "success", "total_amount": "100",
+        "hash": h, "test_mode": "1",
+    })
+    # "OK" so PayTR stops retrying, but the handler must not credit the order.
+    assert resp.status_code == 200 and resp.text == "OK"
+    assert seen == []
+
+    # On a test-mode client the same callback IS delivered.
+    app2 = FastAPI()
+    test_client = PayTRClient(
+        merchant_id=MERCHANT_ID, merchant_key=MERCHANT_KEY,
+        merchant_salt=MERCHANT_SALT, test_mode=True,
+    )
+    app2.include_router(create_paytr_router(test_client, on_payment=on_payment))
+    resp = TestClient(app2).post("/paytr/callback", data={
+        "merchant_oid": "OTEST", "status": "success", "total_amount": "100",
+        "hash": h, "test_mode": "1",
+    })
+    assert resp.status_code == 200 and resp.text == "OK"
+    assert seen == ["OTEST"]
+
+
+def test_get_client_ip_rejects_spoofed_garbage():
+    """A non-IP proxy header must fall back to the socket peer, not be signed."""
+    from fastapi import Request
+
+    from paytr.fastapi import get_client_ip
+
+    def _req(headers: dict, peer: str = "9.8.7.6") -> Request:
+        return Request({
+            "type": "http",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "client": (peer, 1234),
+        })
+
+    assert get_client_ip(_req({"X-Forwarded-For": "1.2.3.4, 10.0.0.1"})) == "1.2.3.4"
+    assert get_client_ip(_req({"CF-Connecting-IP": "2001:db8::1"})) == "2001:db8::1"
+    assert get_client_ip(_req({"X-Forwarded-For": "evil<script>"})) == "9.8.7.6"
+    assert get_client_ip(_req({})) == "9.8.7.6"
+
+
+def test_payment_request_total_and_oid_validation():
+    """Total uses per-line money rounding; merchant_oid must be alphanumeric."""
+    from decimal import Decimal
+
+    from pydantic import ValidationError
+
+    from paytr.fastapi import PaymentRequest
+
+    common = dict(
+        email="a@b.co", user_name="N", user_address="A", user_phone="5",
+    )
+    req = PaymentRequest(**common, basket=[
+        {"name": "X", "unit_price": 10.555, "quantity": 2},
+    ])
+    # Each line rounds to 10.56 first (as encoded in the basket), so the signed
+    # total is 21.12 — not 21.11 from rounding the float sum.
+    assert req.total == Decimal("21.12")
+
+    with pytest.raises(ValidationError):
+        PaymentRequest(**common, merchant_oid="has-dash!", basket=[
+            {"name": "X", "unit_price": 1, "quantity": 1},
+        ])
 
 
 def test_callback_non_numeric_amount_is_mismatch_not_500():

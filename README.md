@@ -87,6 +87,9 @@ client = PayTRClient(
     merchant_salt="your_merchant_salt",
     test_mode=True  # Canlıya geçerken False yapmayı unutmayın!
 )
+# Alternatif: PAYTR_MERCHANT_ID / PAYTR_MERCHANT_KEY / PAYTR_MERCHANT_SALT
+# (ve opsiyonel PAYTR_TEST_MODE=1, PAYTR_DEBUG_ON=1) çevre değişkenlerinden:
+# client = PayTRClient.from_env()
 
 # Ödeme sonucu bildirimlerini işleyen callback fonksiyonu
 async def on_payment(data: CallbackData) -> None:
@@ -159,6 +162,9 @@ include_paytr_routes(
 )
 ```
 
+> [!NOTE]
+> **Test ödemesi koruması:** Callback imzası `test_mode` alanını kapsamaz. Bu yüzden canlı bir istemcide (`test_mode=False`) `test_mode=1` ile gelen bildirimler otomatik olarak "OK" ile onaylanır ama `on_payment` fonksiyonunuza **iletilmez** — test kartıyla yapılan bir ödeme gerçek bir siparişi asla onaylayamaz.
+
 <!-- MARK: İstemci Kullanımı -->
 ## 🛠️ 2. Framework Bağımsız Kullanım (İstemci Sınıfı)
 
@@ -189,7 +195,8 @@ result = await client.create_iframe_token(
     merchant_fail_url="https://siteniz.com/hata",
 )
 
-# HTML iFrame kodunu oluşturun (iframeResizer script'ini otomatik ekler)
+# HTML iFrame kodunu oluşturun (yeni tasarım için gerekli ?v2 iframeResizer
+# script'ini otomatik ekler; klasik tasarım için v2=False geçin)
 html_snippet = iframe_html(result["token"])
 
 # 2. Adım: Bildirim Doğrulama (Callback)

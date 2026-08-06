@@ -23,10 +23,12 @@ def iframe_url(token: str) -> str:
     return f"{IFRAME_BASE_URL}/{token}"
 
 
-def iframe_html(token: str, *, iframe_id: str = "paytriframe") -> str:
-    """Return a ready-to-embed HTML snippet (iframe + auto-resizer)."""
+def iframe_html(token: str, *, iframe_id: str = "paytriframe", v2: bool = True) -> str:
+    """Ready-to-embed HTML snippet. ``v2`` (default) loads the ``?v2`` resizer
+    script the new-design iFrame requires; pass ``v2=False`` for the classic one."""
+    script = "https://www.paytr.com/js/iframeResizer.min.js" + ("?v2" if v2 else "")
     return (
-        '<script src="https://www.paytr.com/js/iframeResizer.min.js"></script>\n'
+        f'<script src="{script}"></script>\n'
         f'<iframe src="{IFRAME_BASE_URL}/{token}" id="{iframe_id}" '
         'frameborder="0" scrolling="no" style="width: 100%;"></iframe>\n'
         f"<script>iFrameResize({{}},'#{iframe_id}');</script>"
@@ -43,10 +45,11 @@ class IframeMixin(_BaseClient):
         email: str,
         payment_amount: str | float | Decimal,
         user_ip: str,
-        user_name: str,
-        user_address: str,
-        user_phone: str,
         user_basket: list[BasketLine],
+        # Optional per the PayTR docs (not part of the token hash).
+        user_name: str = "",
+        user_address: str = "",
+        user_phone: str = "",
         merchant_ok_url: str,
         merchant_fail_url: str,
         currency: str = "TL",

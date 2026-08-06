@@ -126,6 +126,22 @@ class _BaseClient:
             self._owns_session = True
             self._backend = "aiohttp"
 
+    @classmethod
+    def from_env(cls, prefix: str = "PAYTR_", **overrides):
+        """Build a client from ``PAYTR_MERCHANT_ID`` / ``_KEY`` / ``_SALT`` env
+        vars (plus ``_TEST_MODE`` / ``_DEBUG_ON``, ``"1"`` = on). ``overrides``
+        win over the environment."""
+        import os
+
+        env = {
+            "merchant_id": os.environ.get(f"{prefix}MERCHANT_ID", ""),
+            "merchant_key": os.environ.get(f"{prefix}MERCHANT_KEY", ""),
+            "merchant_salt": os.environ.get(f"{prefix}MERCHANT_SALT", ""),
+            "test_mode": os.environ.get(f"{prefix}TEST_MODE", "0") == "1",
+            "debug_on": os.environ.get(f"{prefix}DEBUG_ON", "0") == "1",
+        }
+        return cls(**{**env, **overrides})
+
     # -- lifecycle ----------------------------------------------------------
     async def aclose(self) -> None:
         """Close the session, but only if we created it."""

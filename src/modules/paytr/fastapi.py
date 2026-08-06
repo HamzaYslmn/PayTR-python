@@ -36,8 +36,10 @@ Requires ``fastapi`` (``pip install 'paytr-python[fastapi]'``).
 
 from __future__ import annotations
 
+import ipaddress
 import uuid
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from typing import Literal
 
 try:
@@ -50,6 +52,7 @@ except ImportError as e:  # pragma: no cover - import guard
         "Install it with: pip install 'paytr-python[fastapi]'"
     ) from e
 
+from ._base import _money
 from ._log import logger
 from .client import PayTRClient, PaymentType, iframe_url
 from .errors import describe
@@ -74,15 +77,21 @@ class PaymentRequest(BaseModel):
     user_address: str = Field(max_length=400)
     user_phone: str = Field(max_length=20)
     basket: list[BasketItem] = Field(min_length=1)
-    merchant_oid: str | None = Field(default=None, max_length=64)
+    # PayTR requires an alphanumeric oid; anything else fails at PayTR's end.
+    merchant_oid: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9]+$")
     currency: Currency = "TL"
     lang: Lang = "tr"
     dark_mode: bool = False
     payment_type: PaymentType = "card"  # "eft" = Havale/EFT bank-transfer iFrame
 
     @property
-    def total(self) -> float:
-        return sum(item.unit_price * item.quantity for item in self.basket)
+    def total(self) -> Decimal:
+        """Order total in major units, using the same per-line rounding as the
+        encoded basket so the signed amount always equals the basket sum."""
+        return sum(
+            (Decimal(_money(i.unit_price)) * i.quantity for i in self.basket),
+            Decimal("0"),
+        )
 
 
 class CallbackData(BaseModel):
@@ -136,12 +145,20 @@ AmountResolver = Callable[[str], Awaitable["int | None"]]
 
 
 def get_client_ip(request: Request) -> str:
-    """Best-effort external client IP (honours common proxy headers)."""
+    """Best-effort external client IP (honours common proxy headers).
+
+    Proxy headers are client-controlled, so a candidate is only used if it
+    parses as a real IP address — garbage falls back to the socket peer.
+    """
     forwarded = request.headers.get("CF-Connecting-IP") or request.headers.get(
         "X-Forwarded-For", ""
     )
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        candidate = forwarded.split(",")[0].strip()
+        try:
+            return str(ipaddress.ip_address(candidate))
+        except ValueError:
+            pass
     return request.client.host if request.client else "127.0.0.1"
 
 
@@ -250,6 +267,14 @@ def create_paytr_router(
             return PlainTextResponse(
                 "PAYTR notification failed: bad hash", status_code=400
             )
+        # The hash doesn't cover test_mode, so a test-card "success" verifies —
+        # on a live client, ACK it (stops retries) but never credit the order.
+        if data.is_test and not client.test_mode:
+            logger.error(
+                "test-mode callback for oid=%s on a live client — acknowledged, NOT credited",
+                data.merchant_oid,
+            )
+            return PlainTextResponse("OK")
         # -- reconcile the paid amount against the expected order total --------
         if get_expected_amount is not None and data.is_success:
             expected = await get_expected_amount(data.merchant_oid)
